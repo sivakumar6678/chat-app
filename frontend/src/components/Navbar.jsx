@@ -2,7 +2,7 @@ import React from 'react';
 import { Navbar, Nav, Container, Badge } from 'react-bootstrap';
 import { FaUsers, FaSignOutAlt, FaHome, FaInfoCircle } from 'react-icons/fa';
 
-const NavigationBar = ({ username, onlineUsers, onLogout }) => {
+const NavigationBar = ({ username = '', onlineUsers = [], onLogout }) => {
     return (
         <Navbar bg="dark" variant="dark" expand="lg" className="mb-4">
             <Container>
@@ -28,14 +28,16 @@ const NavigationBar = ({ username, onlineUsers, onLogout }) => {
                             <Badge bg="success" className="me-2">{onlineUsers.length}</Badge>
                             Online Users
                         </Nav.Link>
-                        <Nav.Link className="d-flex align-items-center">
-                            <span className="me-2">👤 {username}</span>
-                            <FaSignOutAlt 
-                                onClick={onLogout} 
-                                style={{ cursor: 'pointer' }}
-                                className="text-danger"
-                            />
-                        </Nav.Link>
+                        {username && (
+                            <Nav.Link className="d-flex align-items-center">
+                                <span className="me-2">👤 {username}</span>
+                                <FaSignOutAlt 
+                                    onClick={onLogout} 
+                                    style={{ cursor: 'pointer' }}
+                                    className="text-danger"
+                                />
+                            </Nav.Link>
+                        )}
                     </Nav>
                 </Navbar.Collapse>
             </Container>
