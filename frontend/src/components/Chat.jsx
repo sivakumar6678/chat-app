@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import io from 'socket.io-client';
 import axios from 'axios';
-import { Container, Row, Col, Form, Button, ListGroup, Alert } from 'react-bootstrap';
-import UserList from './UserList';
+import { Container, Row, Col, Form, Button, Alert, Badge } from 'react-bootstrap';
+import { FaPaperPlane, FaSignOutAlt, FaUsers, FaUser } from 'react-icons/fa';
 import './Chat.css';
 
 const socket = io('http://localhost:5000');
@@ -12,12 +12,13 @@ const Chat = () => {
     const [message, setMessage] = useState('');
     const [messages, setMessages] = useState([]);
     const [onlineUsers, setOnlineUsers] = useState([]);
-    const [selectedUser, setSelectedUser] = useState(null);
     const [isTyping, setIsTyping] = useState(false);
+    const [activeChat, setActiveChat] = useState(null);
     const [error, setError] = useState('');
     const [room, setRoom] = useState('');
     const [isJoined, setIsJoined] = useState(false);
     const messagesEndRef = useRef(null);
+    const typingTimeoutRef = useRef(null);
 
     const scrollToBottom = () => {
         messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -27,135 +28,120 @@ const Chat = () => {
         scrollToBottom();
     }, [messages]);
 
-    useEffect(() => {
-        socket.on('userList', (users) => {
-            setOnlineUsers(users);
-        });
-
-        socket.on('receiveMessage', (message) => {
-            setMessages(prev => [...prev, message]);
-        });
-
-        socket.on('userTyping', (data) => {
-            setIsTyping(true);
-            setTimeout(() => setIsTyping(false), 1000);
-        });
-
-        socket.on('joinError', (error) => {
-            setError(error);
-        });
-
-        return () => {
-            socket.off('userList');
-            socket.off('receiveMessage');
-            socket.off('userTyping');
-            socket.off('joinError');
-        };
-    }, []);
-
-    const handleUsernameSubmit = (e) => {
+    const handleJoin = (e) => {
         e.preventDefault();
         setError('');
-        
-        if (username.trim().length < 3) {
+
+        if (username.length < 3) {
             setError('Username must be at least 3 characters long');
             return;
         }
 
-        if (room.trim().length < 3) {
+        if (room.length < 3) {
             setError('Room name must be at least 3 characters long');
             return;
         }
 
-        socket.emit('joinRoom', { username: username.trim(), room: room.trim() });
+        socket.emit('joinRoom', { username, room });
         setIsJoined(true);
+        setActiveChat(room);
     };
 
-    const handleMessageSubmit = (e) => {
+    const handleSubmit = (e) => {
         e.preventDefault();
-        if (message.trim() && username) {
-            const messageData = {
-                senderId: socket.id,
-                receiverId: selectedUser?.id || room,
+        if (message.trim()) {
+            socket.emit('sendMessage', {
+                senderId: username,
+                receiverId: activeChat,
                 message: message.trim(),
-                sender: username,
-                room: room
-            };
-            socket.emit('sendMessage', messageData);
+                timestamp: new Date().toISOString()
+            });
             setMessage('');
         }
     };
 
-    const handleUserSelect = (user) => {
-        setSelectedUser(user);
-        // Fetch message history
-        axios.get(`http://localhost:5000/messages/${socket.id}/${user.id}`)
-            .then(response => {
-                setMessages(response.data);
-            })
-            .catch(error => {
-                console.error('Error fetching messages:', error);
-            });
-    };
-
     const handleTyping = () => {
-        if (selectedUser) {
-            socket.emit('typing', {
-                user: username,
-                receiverId: selectedUser.id,
-                room: room
-            });
+        if (!isTyping) {
+            setIsTyping(true);
+            socket.emit('typing', { username, room });
         }
+
+        if (typingTimeoutRef.current) {
+            clearTimeout(typingTimeoutRef.current);
+        }
+
+        typingTimeoutRef.current = setTimeout(() => {
+            setIsTyping(false);
+            socket.emit('stopTyping', { username, room });
+        }, 1000);
     };
 
-    const handleLogout = () => {
+    const handleLeave = () => {
         socket.emit('leaveRoom', { username, room });
-        setUsername('');
-        setRoom('');
+        setIsJoined(false);
+        setActiveChat(null);
         setMessages([]);
         setOnlineUsers([]);
-        setSelectedUser(null);
-        setIsJoined(false);
     };
+
+    useEffect(() => {
+        socket.on('message', (message) => {
+            setMessages(prev => [...prev, message]);
+        });
+
+        socket.on('userList', (users) => {
+            setOnlineUsers(users);
+        });
+
+        socket.on('typing', ({ username }) => {
+            setIsTyping(true);
+            setTimeout(() => setIsTyping(false), 1000);
+        });
+
+        socket.on('error', (error) => {
+            setError(error);
+        });
+
+        return () => {
+            socket.off('message');
+            socket.off('userList');
+            socket.off('typing');
+            socket.off('error');
+        };
+    }, []);
 
     if (!isJoined) {
         return (
-            <Container className="mt-5">
-                <Row className="justify-content-center">
-                    <Col md={6}>
-                        <div className="welcome-card">
-                            <h3 className="text-center mb-4">Welcome to ChatApp</h3>
-                            {error && <Alert variant="danger">{error}</Alert>}
-                            <Form onSubmit={handleUsernameSubmit}>
-                                <Form.Group className="mb-3">
-                                    <Form.Label>Enter your username</Form.Label>
-                                    <Form.Control
-                                        type="text"
-                                        value={username}
-                                        onChange={(e) => setUsername(e.target.value)}
-                                        placeholder="Username (min 3 characters)"
-                                        minLength={3}
-                                        required
-                                    />
-                                </Form.Group>
-                                <Form.Group className="mb-3">
-                                    <Form.Label>Enter room name</Form.Label>
-                                    <Form.Control
-                                        type="text"
-                                        value={room}
-                                        onChange={(e) => setRoom(e.target.value)}
-                                        placeholder="Room name (min 3 characters)"
-                                        minLength={3}
-                                        required
-                                    />
-                                </Form.Group>
-                                <Button type="submit" className="w-100">
-                                    Join Chat
-                                </Button>
-                            </Form>
-                        </div>
-                    </Col>
-                </Row>
+            <Container>
+                <div className="welcome-card">
+                    <h3>Welcome to Chat App</h3>
+                    <Form onSubmit={handleJoin}>
+                        <Form.Group className="mb-3">
+                            <Form.Label>Username</Form.Label>
+                            <Form.Control
+                                type="text"
+                                value={username}
+                                onChange={(e) => setUsername(e.target.value)}
+                                placeholder="Enter your username"
+                                required
+                            />
+                        </Form.Group>
+                        <Form.Group className="mb-3">
+                            <Form.Label>Room</Form.Label>
+                            <Form.Control
+                                type="text"
+                                value={room}
+                                onChange={(e) => setRoom(e.target.value)}
+                                placeholder="Enter room name"
+                                required
+                            />
+                        </Form.Group>
+                        {error && <Alert variant="danger">{error}</Alert>}
+                        <Button type="submit" className="w-100">
+                            Join Chat
+                        </Button>
+                    </Form>
+                </div>
             </Container>
         );
     }
@@ -164,61 +150,78 @@ const Chat = () => {
         <Container fluid className="chat-container">
             <Row className="h-100">
                 <Col md={3} className="user-list-container">
-                    <div className="d-flex justify-content-between align-items-center mb-3">
-                        <h4>Room: {room}</h4>
-                        <Button variant="outline-danger" size="sm" onClick={handleLogout}>
-                            Leave
-                        </Button>
+                    <div className="user-list-header">
+                        <h4>Online Users</h4>
+                        <Badge bg="primary">{onlineUsers.length}</Badge>
                     </div>
-                    <UserList
-                        onlineUsers={onlineUsers}
-                        selectedUser={selectedUser}
-                        onUserSelect={handleUserSelect}
-                    />
+                    <div className="user-list">
+                        {onlineUsers.map((user) => (
+                            <div
+                                key={user.id}
+                                className={`user-list-item ${user.username === username ? 'active' : ''}`}
+                            >
+                                <div className="user-icon">
+                                    <FaUser />
+                                </div>
+                                <div className="user-info">
+                                    <div className="user-name">{user.username}</div>
+                                    <div className="user-status">Online</div>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
                 </Col>
                 <Col md={9} className="chat-main">
                     <div className="chat-header">
-                        <h3>{selectedUser ? `Chat with ${selectedUser.username}` : `Room: ${room}`}</h3>
+                        <h3>Room: {room}</h3>
+                        <Button variant="outline-danger" onClick={handleLeave}>
+                            <FaSignOutAlt /> Leave
+                        </Button>
                     </div>
                     <div className="messages-container">
-                        <ListGroup className="messages-list">
+                        <div className="messages-list">
                             {messages.map((msg, index) => (
-                                <ListGroup.Item
+                                <div
                                     key={index}
-                                    className={`message ${msg.senderId === socket.id ? 'sent' : 'received'}`}
+                                    className={`message ${msg.senderId === username ? 'sent' : 'received'}`}
+                                    data-sender={msg.senderId === 'system' ? 'system' : 'user'}
                                 >
                                     <div className="message-content">
-                                        <div className="message-sender">{msg.sender}</div>
+                                        {msg.senderId !== 'system' && (
+                                            <div className="message-sender">
+                                                {msg.senderId === username ? 'You' : msg.senderId}
+                                            </div>
+                                        )}
                                         <div className="message-text">{msg.message}</div>
-                                        <div className="message-time">
-                                            {new Date(msg.timestamp).toLocaleTimeString()}
-                                        </div>
+                                        {msg.senderId !== 'system' && (
+                                            <div className="message-time">
+                                                {new Date(msg.timestamp).toLocaleTimeString()}
+                                            </div>
+                                        )}
                                     </div>
-                                </ListGroup.Item>
+                                </div>
                             ))}
+                            {isTyping && (
+                                <div className="typing-indicator">
+                                    Someone is typing...
+                                </div>
+                            )}
                             <div ref={messagesEndRef} />
-                        </ListGroup>
-                        {isTyping && (
-                            <div className="typing-indicator">
-                                {selectedUser?.username} is typing...
-                            </div>
-                        )}
+                        </div>
                     </div>
-                    <Form onSubmit={handleMessageSubmit} className="message-form">
-                        <Form.Group className="d-flex">
-                            <Form.Control
-                                type="text"
-                                value={message}
-                                onChange={(e) => {
-                                    setMessage(e.target.value);
-                                    handleTyping();
-                                }}
-                                placeholder="Type a message..."
-                            />
-                            <Button type="submit" variant="primary" className="ms-2">
-                                Send
-                            </Button>
-                        </Form.Group>
+                    <Form className="message-form" onSubmit={handleSubmit}>
+                        <Form.Control
+                            type="text"
+                            value={message}
+                            onChange={(e) => {
+                                setMessage(e.target.value);
+                                handleTyping();
+                            }}
+                            placeholder="Type a message..."
+                        />
+                        <Button type="submit">
+                            <FaPaperPlane /> Send
+                        </Button>
                     </Form>
                 </Col>
             </Row>
