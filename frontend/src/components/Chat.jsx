@@ -5,10 +5,12 @@ import { Container, Row, Col, Form, Button, Alert, Badge, Modal } from 'react-bo
 import { FaPaperPlane, FaSignOutAlt, FaUsers, FaUser, FaBars, FaTimes, FaSmile, FaImage, FaPaperclip } from 'react-icons/fa';
 import NavigationBar from './Navbar';
 import './Chat.css';
+import { toast } from 'react-toastify';
 
 const socket = io('http://localhost:5000', {
     withCredentials: true,
-    transports: ['websocket', 'polling']
+    transports: ['websocket'],
+    autoConnect: true
 });
 
 const Chat = () => {
@@ -29,41 +31,89 @@ const Chat = () => {
     const messagesEndRef = useRef(null);
     const typingTimeoutRef = useRef(null);
     const fileInputRef = useRef(null);
+    const [loading, setLoading] = useState(true);
 
     const scrollToBottom = () => {
         messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
     };
 
     useEffect(() => {
-        scrollToBottom();
-    }, [messages]);
-
-    const handleJoin = (e) => {
-        e.preventDefault();
-        setError('');
-
-        if (username.length < 3) {
-            setError('Username must be at least 3 characters long');
-            return;
-        }
-
-        if (room.length < 3) {
-            setError('Room name must be at least 3 characters long');
-            return;
-        }
-
-        socket.emit('joinRoom', { username, room });
-        setIsJoined(true);
-        setActiveChat(room);
-        fetchMessageHistory();
-    };
+        socket.on('connect', () => {
+            console.log('Connected to server');
+        });
+    
+        socket.on('connect_error', (error) => {
+            console.error('Socket connection error:', error);
+            setError('Failed to connect to server');
+        });
+    
+        return () => {
+            socket.off('connect');
+            socket.off('connect_error');
+        };
+    }, []);
 
     const fetchMessageHistory = async () => {
         try {
+            if (!room) {
+                console.log('No room specified');
+                return;
+            }
+            
+            console.log('Fetching messages for room:', room);
             const response = await axios.get(`http://localhost:5000/messages/${room}`);
-            setMessageHistory(response.data);
+            
+            // Check if the response contains messages
+            if (response.data.messages) {
+                setMessages(response.data.messages);
+            } else {
+                setMessages([]); // Initialize with empty array for new rooms
+                console.log('Starting new chat room');
+            }
         } catch (error) {
             console.error('Error fetching message history:', error);
+            setMessages([]); // Initialize with empty array on error
+            if (error.response?.status !== 404) {
+                setError('Failed to fetch message history');
+            }
+        }
+    };
+
+    const checkRoomExists = async (roomId) => {
+        try {
+            const response = await axios.get(`http://localhost:5000/room/${roomId}/exists`);
+            return response.data.exists;
+        } catch (error) {
+            console.error('Error checking room:', error);
+            return false;
+        }
+    };
+
+    const handleJoin = async (e) => {
+        e.preventDefault();
+        setError('');
+
+        try {
+            if (username.length < 3) {
+                setError('Username must be at least 3 characters long');
+                return;
+            }
+
+            if (room.length < 3) {
+                setError('Room name must be at least 3 characters long');
+                return;
+            }
+
+            // Join room first
+            socket.emit('joinRoom', { username, room });
+            setIsJoined(true);
+            
+            // Then fetch messages
+            await fetchMessageHistory();
+        } catch (error) {
+            console.error('Error joining room:', error);
+            setError('Failed to join room');
+            setIsJoined(false);
         }
     };
 
@@ -75,7 +125,7 @@ const Chat = () => {
                 receiverId: activeChat,
                 message: message.trim(),
                 timestamp: new Date().toISOString(),
-                type: 'text'
+                type: 'text' // Ensure type is set
             };
             socket.emit('sendMessage', messageData);
             setMessage('');
@@ -148,35 +198,63 @@ const Chat = () => {
     };
 
     useEffect(() => {
-        socket.on('message', (message) => {
-            setMessages(prev => [...prev, message]);
+        if (isJoined && room) {
+            socket.disconnect();
+            socket.io.opts.query = { room };
+            socket.connect();
+            
+            socket.on('message', (message) => {
+                setMessageHistory(prev => [...prev, message]);
+            });
+
+            socket.on('userList', (users) => {
+                setOnlineUsers(users || []);
+            });
+
+            socket.on('typing', ({ username }) => {
+                setIsTyping(true);
+                setTimeout(() => setIsTyping(false), 1000);
+            });
+
+            socket.on('error', (error) => {
+                setError(error);
+            });
+
+            return () => {
+                socket.off('message');
+                socket.off('userList');
+                socket.off('typing');
+                socket.off('error');
+                socket.disconnect();
+            };
+        }
+    }, [isJoined, room]);
+
+    useEffect(() => {
+        socket.on('connect', () => {
+            console.log('Connected to server');
         });
 
-        socket.on('userList', (users) => {
-            setOnlineUsers(users || []);
-        });
-
-        socket.on('typing', ({ username }) => {
-            setIsTyping(true);
-            setTimeout(() => setIsTyping(false), 1000);
-        });
-
-        socket.on('error', (error) => {
-            setError(error);
+        socket.on('connect_error', (error) => {
+            console.error('Socket connection error:', error);
+            setError('Failed to connect to server');
         });
 
         return () => {
-            socket.off('message');
-            socket.off('userList');
-            socket.off('typing');
-            socket.off('error');
+            socket.off('connect');
+            socket.off('connect_error');
         };
     }, []);
 
     if (!isJoined) {
         return (
             <>
-                <NavigationBar username={username} onlineUsers={onlineUsers} onLogout={handleLogout} />
+                <NavigationBar 
+                    username={username}
+                    onlineUsers={onlineUsers}
+                    onLogout={handleLogout}
+                    isJoined={isJoined}
+                />
                 <Container>
                     <div className="welcome-card">
                         <h3>Welcome to Chat App</h3>
@@ -214,7 +292,12 @@ const Chat = () => {
 
     return (
         <>
-            <NavigationBar username={username} onlineUsers={onlineUsers} onLogout={handleLogout} />
+            <NavigationBar 
+                username={username}
+                onlineUsers={onlineUsers}
+                onLogout={handleLogout}
+                isJoined={isJoined}
+            />
             <Container fluid className="chat-container">
                 <Button className="toggle-user-list" onClick={toggleUserList}>
                     {showUserList ? <FaTimes /> : <FaBars />}
@@ -252,36 +335,7 @@ const Chat = () => {
                             <div className="messages-list">
                                 {messageHistory.map((msg, index) => (
                                     <div
-                                        key={`history-${index}`}
-                                        className={`message ${msg.senderId === username ? 'sent' : 'received'}`}
-                                        data-sender={msg.senderId === 'system' ? 'system' : 'user'}
-                                    >
-                                        <div className="message-content">
-                                            {msg.senderId !== 'system' && (
-                                                <div className="message-sender">
-                                                    {msg.senderId === username ? 'You' : msg.senderId}
-                                                </div>
-                                            )}
-                                            {msg.type === 'image' ? (
-                                                <img src={msg.message} alt="Shared" style={{ maxWidth: '100%', borderRadius: '8px' }} />
-                                            ) : msg.type === 'file' ? (
-                                                <a href={msg.message} target="_blank" rel="noopener noreferrer">
-                                                    Download File
-                                                </a>
-                                            ) : (
-                                                <div className="message-text">{msg.message}</div>
-                                            )}
-                                            {msg.senderId !== 'system' && (
-                                                <div className="message-time">
-                                                    {new Date(msg.timestamp).toLocaleTimeString()}
-                                                </div>
-                                            )}
-                                        </div>
-                                    </div>
-                                ))}
-                                {messages.map((msg, index) => (
-                                    <div
-                                        key={`new-${index}`}
+                                        key={`msg-${index}`}
                                         className={`message ${msg.senderId === username ? 'sent' : 'received'}`}
                                         data-sender={msg.senderId === 'system' ? 'system' : 'user'}
                                     >

@@ -14,17 +14,13 @@ const app = express();
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
     cors: {
-        origin: "http://localhost:5173",
-        methods: ["GET", "POST"],
-        credentials: true
+        origin: "*",
+        methods: ["GET", "POST"]
     }
 });
 
 // Middleware
-app.use(cors({
-    origin: "http://localhost:5173",
-    credentials: true
-}));
+app.use(cors());
 app.use(express.json());
 app.use('/uploads', express.static('uploads'));
 
@@ -36,150 +32,80 @@ mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/chatapp',
     .then(() => console.log('Connected to MongoDB'))
     .catch(err => console.error('MongoDB connection error:', err));
 
-// Store online users with their IDs and rooms
-const onlineUsers = new Map();
+// In-memory storage for chat rooms and messages
+const chatRooms = new Map();
 
 // Socket.io Connection Handling
 io.on('connection', (socket) => {
     console.log('User connected:', socket.id);
 
-    // Handle user joining a room
     socket.on('joinRoom', ({ username, room }) => {
-        // Validate username and room
-        if (username.length < 3) {
-            socket.emit('joinError', 'Username must be at least 3 characters long');
-            return;
-        }
-
-        if (room.length < 3) {
-            socket.emit('joinError', 'Room name must be at least 3 characters long');
-            return;
-        }
-
-        // Check if username is already taken in this room
-        const existingUser = Array.from(onlineUsers.values()).find(
-            user => user.username === username && user.room === room
-        );
-
-        if (existingUser) {
-            socket.emit('joinError', 'Username is already taken in this room');
-            return;
-        }
-
         // Join the room
         socket.join(room);
+        socket.username = username;
+        socket.currentRoom = room;
 
-        // Store user information
-        onlineUsers.set(socket.id, {
-            username,
-            id: socket.id,
-            room
-        });
-
-        // Emit updated user list to the room
-        io.to(room).emit('userList', Array.from(onlineUsers.values())
-            .filter(user => user.room === room)
-            .map(user => ({
-                username: user.username,
-                id: user.id
-            })));
-
-        // Emit welcome message
-        socket.emit('receiveMessage', {
-            senderId: 'system',
-            receiverId: room,
-            message: `${username} has joined the room`,
-            timestamp: new Date()
-        });
-    });
-
-    // Handle new messages
-    socket.on('sendMessage', async (data) => {
-        try {
-            const message = new Message({
-                senderId: data.senderId,
-                receiverId: data.receiverId,
-                message: data.message
-            });
-            await message.save();
-            
-            // Emit to specific receiver if it's a private message
-            if (data.receiverId !== data.room) {
-                io.to(data.receiverId).emit('receiveMessage', {
-                    ...data,
-                    timestamp: message.timestamp
-                });
-            }
-            
-            // Emit to the room
-            io.to(data.room).emit('receiveMessage', {
-                ...data,
-                timestamp: message.timestamp
-            });
-        } catch (error) {
-            console.error('Error saving message:', error);
-        }
-    });
-
-    // Handle typing indicator
-    socket.on('typing', (data) => {
-        if (data.receiverId !== data.room) {
-            io.to(data.receiverId).emit('userTyping', {
-                user: data.user,
-                receiverId: data.receiverId
+        // Initialize room if it doesn't exist
+        if (!chatRooms.has(room)) {
+            chatRooms.set(room, {
+                messages: [],
+                users: []
             });
         }
-        io.to(data.room).emit('userTyping', {
-            user: data.user,
-            receiverId: data.room
-        });
+
+        // Add user to room
+        const roomData = chatRooms.get(room);
+        roomData.users.push({ id: socket.id, username });
+
+        // Send join message
+        const joinMessage = {
+            id: Date.now(),
+            type: 'system',
+            content: `${username} has joined the chat`,
+            timestamp: new Date().toISOString()
+        };
+        roomData.messages.push(joinMessage);
+
+        // Broadcast updates
+        io.to(room).emit('message', joinMessage);
+        io.to(room).emit('userList', roomData.users);
     });
 
-    // Handle leaving room
-    socket.on('leaveRoom', ({ username, room }) => {
-        socket.leave(room);
-        onlineUsers.delete(socket.id);
-        
-        // Emit updated user list to the room
-        io.to(room).emit('userList', Array.from(onlineUsers.values())
-            .filter(user => user.room === room)
-            .map(user => ({
-                username: user.username,
-                id: user.id
-            })));
-
-        // Emit leave message
-        io.to(room).emit('receiveMessage', {
-            senderId: 'system',
-            receiverId: room,
-            message: `${username} has left the room`,
-            timestamp: new Date()
-        });
+    socket.on('sendMessage', (message) => {
+        const room = socket.currentRoom;
+        if (!room || !chatRooms.has(room)) return;
+    
+        const newMessage = {
+            id: Date.now(),
+            senderId: socket.username, // Change this to senderId
+            message: message.message, // Use message.message
+            timestamp: new Date().toISOString(),
+            type: message.type || 'text' // Add type if needed
+        };
+    
+        chatRooms.get(room).messages.push(newMessage);
+        io.to(room).emit('message', newMessage);
     });
 
-    // Handle disconnection
     socket.on('disconnect', () => {
-        const user = onlineUsers.get(socket.id);
-        if (user) {
-            const { username, room } = user;
-            socket.leave(room);
-            onlineUsers.delete(socket.id);
+        const room = socket.currentRoom;
+        if (room && chatRooms.has(room)) {
+            const roomData = chatRooms.get(room);
             
-            // Emit updated user list to the room
-            io.to(room).emit('userList', Array.from(onlineUsers.values())
-                .filter(user => user.room === room)
-                .map(user => ({
-                    username: user.username,
-                    id: user.id
-                })));
+            // Remove user from room
+            roomData.users = roomData.users.filter(user => user.id !== socket.id);
 
-            // Emit disconnect message
-            io.to(room).emit('receiveMessage', {
-                senderId: 'system',
-                receiverId: room,
-                message: `${username} has disconnected`,
-                timestamp: new Date()
-            });
+            if (socket.username) {
+                const leaveMessage = {
+                    id: Date.now(),
+                    type: 'system',
+                    content: `${socket.username} has left the chat`,
+                    timestamp: new Date().toISOString()
+                };
+                roomData.messages.push(leaveMessage);
+                io.to(room).emit('message', leaveMessage);
+                io.to(room).emit('userList', roomData.users);
+            }
         }
         console.log('User disconnected:', socket.id);
     });
@@ -223,7 +149,52 @@ app.get('/messages/room/:roomId', async (req, res) => {
     }
 });
 
+// Route to get all messages for a room
+app.get('/messages/:room', (req, res) => {
+    const { room } = req.params;
+    const roomData = chatRooms.get(room);
+    
+    if (!roomData) {
+        return res.status(404).json({ message: 'Room not found' });
+    }
+    
+    res.json({ messages: roomData.messages, exists: roomData.messages.length > 0 });
+});
+
+// Add this route to check if room exists
+app.get('/room/:roomId/exists', (req, res) => {
+    const { roomId } = req.params;
+    const exists = chatRooms.has(roomId) && chatRooms.get(roomId).length > 0;
+    res.json({ exists });
+});
+
+// Add this after your routes
+app.use((err, req, res, next) => {
+    console.error(err.stack);
+    res.status(500).json({ 
+        message: 'Something went wrong!',
+        error: process.env.NODE_ENV === 'development' ? err.message : undefined
+    });
+});
+
+// Handle 404
+app.use((req, res) => {
+    res.status(404).json({ message: 'Route not found' });
+});
+
+// Test route to verify server is running
+app.get('/test', (req, res) => {
+    res.json({ status: 'Server is running' });
+});
+
+// Add at the top of your server.js
+app.use((req, res, next) => {
+    console.log(`${req.method} ${req.url}`);
+    next();
+});
+
 const PORT = process.env.PORT || 5000;
 httpServer.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
+    console.log(`CORS enabled for origin: *`);
 });
