@@ -28,6 +28,7 @@ const Chat = () => {
     const typingTimeoutRef = useRef(null);
     const fileInputRef = useRef(null);
     const typingTimersRef = useRef({});
+    const [lastCheckTime, setLastCheckTime] = useState(Date.now());
 
     const scrollToBottom = useCallback(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -40,6 +41,39 @@ const Chat = () => {
             delete typingTimersRef.current[typingUsername];
         }
     }, []);
+
+    const fetchLatestData = useCallback(async () => {
+        try {
+            const response = await fetch(`http://localhost:5000/api/messages/${room}`);
+            if (response.ok) {
+                const data = await response.json();
+                setMessageHistory(prev => {
+                    if (data.length > prev.length) {
+                        return data;
+                    }
+                    return prev;
+                });
+            }
+
+            const usersResponse = await fetch(`http://localhost:5000/api/users/${room}`);
+            if (usersResponse.ok) {
+                const usersData = await usersResponse.json();
+                setOnlineUsers(usersData);
+            }
+
+            setLastCheckTime(Date.now());
+        } catch (error) {
+            console.error('Error fetching latest data:', error);
+        }
+    }, [room]);
+
+    useEffect(() => {
+        const checkInterval = setInterval(() => {
+            fetchLatestData();
+        }, 60000);
+
+        return () => clearInterval(checkInterval);
+    }, [fetchLatestData]);
 
     useEffect(() => {
         socket.on('connect', () => {
