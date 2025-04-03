@@ -14,8 +14,9 @@ const app = express();
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
     cors: {
-        origin: "*",
-        methods: ["GET", "POST"]
+        origin: "http://localhost:3000",
+        methods: ["GET", "POST"],
+        credentials: true
     }
 });
 
@@ -32,79 +33,130 @@ mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/chatapp',
     .then(() => console.log('Connected to MongoDB'))
     .catch(err => console.error('MongoDB connection error:', err));
 
-// In-memory storage for chat rooms and messages
-const chatRooms = new Map();
+// In-memory storage for connected users
+const connectedUsers = new Map();
 
 // Socket.io Connection Handling
 io.on('connection', (socket) => {
     console.log('User connected:', socket.id);
 
-    socket.on('joinRoom', ({ username, room }) => {
-        // Join the room
-        socket.join(room);
-        socket.username = username;
-        socket.currentRoom = room;
+    socket.on('joinRoom', async ({ username, room }) => {
+        try {
+            // Validate input
+            if (!username || !room) {
+                socket.emit('error', 'Username and room are required');
+                return;
+            }
 
-        // Initialize room if it doesn't exist
-        if (!chatRooms.has(room)) {
-            chatRooms.set(room, {
-                messages: [],
-                users: []
+            // Check if username is already taken in the same room
+            const existingUser = Array.from(connectedUsers.values()).find(
+                user => user.username === username && user.room === room
+            );
+
+            if (existingUser) {
+                socket.emit('error', 'Username is already taken in this room. Please choose another one.');
+                return;
+            }
+
+            // Store user information
+            connectedUsers.set(socket.id, {
+                username,
+                room,
+                socketId: socket.id
             });
+
+            socket.username = username;
+            socket.room = room;
+
+            // Join the room
+            socket.join(room);
+
+            // Fetch existing messages for the room
+            const messages = await Message.find({ room }).sort({ timestamp: 1 });
+
+            // Send join success and message history
+            socket.emit('joinSuccess', { room, username });
+            socket.emit('messageHistory', messages);
+
+            // Broadcast user joined message
+            const joinMessage = {
+                senderId: 'system',
+                message: `${username} has joined the chat`,
+                timestamp: new Date().toISOString(),
+                type: 'system'
+            };
+            io.to(room).emit('message', joinMessage);
+
+            // Update user list
+            const usersInRoom = Array.from(connectedUsers.values())
+                .filter(user => user.room === room)
+                .map(user => user.username);
+            io.to(room).emit('userList', usersInRoom);
+
+        } catch (error) {
+            console.error('Error joining room:', error);
+            socket.emit('error', 'Failed to join room');
         }
-
-        // Add user to room
-        const roomData = chatRooms.get(room);
-        roomData.users.push({ id: socket.id, username });
-
-        // Send join message
-        const joinMessage = {
-            id: Date.now(),
-            type: 'system',
-            content: `${username} has joined the chat`,
-            timestamp: new Date().toISOString()
-        };
-        roomData.messages.push(joinMessage);
-
-        // Broadcast updates
-        io.to(room).emit('message', joinMessage);
-        io.to(room).emit('userList', roomData.users);
     });
 
-    socket.on('sendMessage', (message) => {
-        const room = socket.currentRoom;
-        if (!room || !chatRooms.has(room)) return;
-    
-        const newMessage = {
-            id: Date.now(),
-            senderId: socket.username, // Change this to senderId
-            message: message.message, // Use message.message
-            timestamp: new Date().toISOString(),
-            type: message.type || 'text' // Add type if needed
-        };
-    
-        chatRooms.get(room).messages.push(newMessage);
-        io.to(room).emit('message', newMessage);
+    socket.on('sendMessage', async (messageData) => {
+        try {
+            const room = socket.room;
+            if (!room) {
+                socket.emit('error', 'You are not in a room');
+                return;
+            }
+
+            const newMessage = {
+                senderId: socket.username,
+                room: room,
+                message: messageData.message,
+                timestamp: new Date().toISOString(),
+                type: messageData.type || 'text',
+                filename: messageData.filename
+            };
+
+            // Save message to database
+            const savedMessage = await Message.create(newMessage);
+
+            // Broadcast message to all users in the room
+            io.to(room).emit('message', savedMessage);
+
+        } catch (error) {
+            console.error('Error sending message:', error);
+            socket.emit('error', 'Failed to send message');
+        }
+    });
+
+    socket.on('typing', ({ username, room }) => {
+        socket.to(room).emit('typing', { username });
+    });
+
+    socket.on('stopTyping', ({ username, room }) => {
+        socket.to(room).emit('stopTyping', { username });
     });
 
     socket.on('disconnect', () => {
-        const room = socket.currentRoom;
-        if (room && chatRooms.has(room)) {
-            const roomData = chatRooms.get(room);
-            
-            // Remove user from room
-            roomData.users = roomData.users.filter(user => user.id !== socket.id);
+        const user = connectedUsers.get(socket.id);
+        if (user) {
+            const { username, room } = user;
+            connectedUsers.delete(socket.id);
 
-            if (socket.username) {
+            if (room) {
+                // Broadcast user left message
                 const leaveMessage = {
-                    id: Date.now(),
-                    type: 'system',
-                    content: `${socket.username} has left the chat`,
-                    timestamp: new Date().toISOString()
+                    senderId: 'system',
+                    message: `${username} has left the chat`,
+                    timestamp: new Date().toISOString(),
+                    type: 'system'
                 };
-                roomData.messages.push(leaveMessage);
                 io.to(room).emit('message', leaveMessage);
-                io.to(room).emit('userList', roomData.users);
+
+                // Update user list
+                const usersInRoom = Array.from(connectedUsers.values())
+                    .filter(user => user.room === room)
+                    .map(user => user.username);
+                io.to(room).emit('userList', usersInRoom);
             }
         }
         console.log('User disconnected:', socket.id);
@@ -122,79 +174,36 @@ app.post('/messages', async (req, res) => {
     }
 });
 
-// Get messages between two users
-app.get('/messages/:senderId/:receiverId', async (req, res) => {
+// Get messages for a room
+app.get('/messages/:room', async (req, res) => {
     try {
-        const messages = await Message.find({
-            $or: [
-                { senderId: req.params.senderId, receiverId: req.params.receiverId },
-                { senderId: req.params.receiverId, receiverId: req.params.senderId }
-            ]
-        }).sort({ timestamp: 1 });
+        const messages = await Message.find({ room: req.params.room }).sort({ timestamp: 1 });
         res.json(messages);
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
 });
 
-// Get all messages for a room
-app.get('/messages/room/:roomId', async (req, res) => {
-    try {
-        const messages = await Message.find({
-            receiverId: req.params.roomId
-        }).sort({ timestamp: 1 });
-        res.json(messages);
-    } catch (error) {
-        res.status(500).json({ error: error.message });
+// File upload handling
+const storage = multer.diskStorage({
+    destination: function (req, file, cb) {
+        cb(null, 'uploads/');
+    },
+    filename: function (req, file, cb) {
+        cb(null, Date.now() + '-' + file.originalname);
     }
 });
 
-// Route to get all messages for a room
-app.get('/messages/:room', (req, res) => {
-    const { room } = req.params;
-    const roomData = chatRooms.get(room);
-    
-    if (!roomData) {
-        return res.status(404).json({ message: 'Room not found' });
+const upload = multer({ storage: storage });
+
+app.post('/upload', upload.single('file'), (req, res) => {
+    if (!req.file) {
+        return res.status(400).json({ error: 'No file uploaded' });
     }
-    
-    res.json({ messages: roomData.messages, exists: roomData.messages.length > 0 });
-});
-
-// Add this route to check if room exists
-app.get('/room/:roomId/exists', (req, res) => {
-    const { roomId } = req.params;
-    const exists = chatRooms.has(roomId) && chatRooms.get(roomId).length > 0;
-    res.json({ exists });
-});
-
-// Add this after your routes
-app.use((err, req, res, next) => {
-    console.error(err.stack);
-    res.status(500).json({ 
-        message: 'Something went wrong!',
-        error: process.env.NODE_ENV === 'development' ? err.message : undefined
-    });
-});
-
-// Handle 404
-app.use((req, res) => {
-    res.status(404).json({ message: 'Route not found' });
-});
-
-// Test route to verify server is running
-app.get('/test', (req, res) => {
-    res.json({ status: 'Server is running' });
-});
-
-// Add at the top of your server.js
-app.use((req, res, next) => {
-    console.log(`${req.method} ${req.url}`);
-    next();
+    res.json({ url: `/uploads/${req.file.filename}` });
 });
 
 const PORT = process.env.PORT || 5000;
 httpServer.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
-    console.log(`CORS enabled for origin: *`);
 });

@@ -5,13 +5,23 @@ const messageSchema = new mongoose.Schema({
         type: String,
         required: true
     },
-    receiverId: {
+    room: {
         type: String,
-        required: true
+        required: true,
+        index: true
     },
     message: {
         type: String,
         required: true
+    },
+    type: {
+        type: String,
+        required: true,
+        default: 'text'
+    },
+    filename: {
+        type: String,
+        required: false
     },
     timestamp: {
         type: Date,
